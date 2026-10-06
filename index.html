@@ -61,7 +61,7 @@ body{margin:0;background:var(--sage);min-height:100vh}
 فقط مقدارهای enabled / name / price را تغییر دهید.
 برای آیتم بدون قیمت، price را null نگه دارید.
 بعد از ذخیره فایل، صفحه را Refresh کنید.
-حذف آیتم فقط متن همان سطر را مخفی می‌کند تا طراحی اصلی به هم نخورد.
+حذف آیتم باعث خالی ماندن ردیف نمی‌شود؛ ردیف‌های بعدی خودکار بالا می‌آیند.
 ============================================================
 */
 const MENU_CONFIG = {
@@ -142,8 +142,8 @@ const MENU_CONFIG = {
   "p3_24": {"enabled": true, "name": "چیز برگر", "price": 750},
 
   // صفحه 4: قهوه، چای و نوشیدنی‌های گرم
-  "p4_01": {"enabled": true, "name": "اسپرسو", "price": 250},
-  "p4_02": {"enabled": true, "name": "آمریکانو", "price": 250},
+  "p4_01": {"enabled": true, "name": "اسپرسو", "price": 235},
+  "p4_02": {"enabled": true, "name": "آمریکانو", "price": 235},
   "p4_03": {"enabled": true, "name": "رومانو", "price": 255},
   "p4_04": {"enabled": true, "name": "نسکافه", "price": 230},
   "p4_05": {"enabled": true, "name": "کافی لاته ساده", "price": 270},
@@ -228,6 +228,14 @@ const MENU_CONFIG = {
   const SVG_NS = "http://www.w3.org/2000/svg";
   const FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
   const EN_DIGITS = "0123456789";
+  const ROW_EPS = 0.08;
+  const PRICE_X_MAX_LOCAL = 160;
+
+  function normDigits(value) {
+    return String(value ?? "")
+      .replace(/[۰-۹]/g, d => EN_DIGITS[FA_DIGITS.indexOf(d)])
+      .replace(/[^0-9]/g, "");
+  }
 
   function toFaDigits(value) {
     return String(value ?? "").replace(/[0-9]/g, d => FA_DIGITS[EN_DIGITS.indexOf(d)]);
@@ -235,162 +243,338 @@ const MENU_CONFIG = {
 
   function normalizePrice(value) {
     if (value === null || value === undefined || value === "") return null;
-    const cleaned = String(value)
-      .replace(/[,\s]/g, "")
-      .replace(/[۰-۹]/g, d => EN_DIGITS[FA_DIGITS.indexOf(d)]);
-    if (!/^\d+$/.test(cleaned)) return null;
-    return Number(cleaned);
+    const cleaned = normDigits(value);
+    return /^\d+$/.test(cleaned) ? Number(cleaned) : null;
   }
 
-  function scaledTextLength(originalLength, originalText, newText) {
-    if (!originalLength) return 100;
-    const oldChars = Math.max(1, String(originalText || "").replace(/\s/g, "").length);
-    const newChars = Math.max(1, String(newText || "").replace(/\s/g, "").length);
-    return Math.max(12, Math.min(185, originalLength * newChars / oldChars));
+  function numAttr(el, name, fallback = NaN) {
+    if (!el) return fallback;
+    const n = parseFloat(el.getAttribute(name));
+    return Number.isFinite(n) ? n : fallback;
   }
 
-  function makeText(attrs, value) {
-    const el = document.createElementNS(SVG_NS, "text");
-    Object.entries(attrs).forEach(([key, val]) => {
-      if (val !== null && val !== undefined) el.setAttribute(key, String(val));
-    });
-    el.textContent = value;
-    return el;
+  function viewBoxX(svg) {
+    const p = (svg.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(Number);
+    return Number.isFinite(p[0]) ? p[0] : 0;
   }
 
-  function getViewBoxX(svg) {
-    const parts = (svg.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(Number);
-    return Number.isFinite(parts[0]) ? parts[0] : 0;
+  function getHref(use) {
+    return use.getAttribute("href") || use.getAttributeNS("http://www.w3.org/1999/xlink", "href") || "";
   }
 
-  function drawChangedItem(svg, item, nameNode, priceNode) {
-    const viewX = getViewBoxX(svg);
-    const group = document.createElementNS(SVG_NS, "g");
-    group.setAttribute("class", "turna-edit-overlay");
-    group.setAttribute("aria-hidden", "true");
+  function textNodes(svg) {
+    const tx = svg.querySelector("g.tx");
+    return tx ? [...tx.querySelectorAll("text")] : [];
+  }
 
-    const y = parseFloat(nameNode.getAttribute("y"));
-    const nameX = parseFloat(nameNode.getAttribute("x"));
-    const nameLength = parseFloat(nameNode.getAttribute("textLength") || "100");
-    const originalDisplay = nameNode.dataset.originalDisplay || nameNode.textContent.trim();
-    const merged = nameNode.dataset.menuMerged === "1";
+  function itemNodes(svg) {
+    return textNodes(svg).filter(n => n.hasAttribute("data-menu-id") && n.getAttribute("data-menu-role") === "name");
+  }
 
-    // سفید کردن همان محدوده‌ای که متن اصلی در آن قرار دارد.
-    const mask = document.createElementNS(SVG_NS, "rect");
-    mask.setAttribute("x", viewX + 50);
-    mask.setAttribute("y", y - 12.5);
-    mask.setAttribute("width", 195);
-    mask.setAttribute("height", 18);
-    mask.setAttribute("fill", "#fff");
-    group.appendChild(mask);
+  function priceNodeFor(svg, id) {
+    return svg.querySelector(`[data-menu-id="${CSS.escape(id)}"][data-menu-role="price"]`);
+  }
 
-    if (item.enabled === false) {
-      svg.appendChild(group);
-      return;
+  function originalName(node) {
+    const raw = node.getAttribute("data-original-display") || node.textContent.trim();
+    return node.getAttribute("data-menu-merged") === "1"
+      ? raw.replace(/\s*[۰-۹0-9]+\s*$/, "").trim()
+      : raw.trim();
+  }
+
+  function directVisualGroups(svg) {
+    const root = [...svg.children].find(e => e.tagName?.toLowerCase() === "g" && e.getAttribute("aria-hidden") === "true");
+    return root ? [...root.children].filter(e => e.tagName?.toLowerCase() === "g") : [];
+  }
+
+  function groupUses(group) {
+    return [...group.children].filter(e => e.tagName?.toLowerCase() === "use" && Number.isFinite(numAttr(e,"x")) && Number.isFinite(numAttr(e,"y")));
+  }
+
+  function groupY(group) {
+    const uses = groupUses(group);
+    if (!uses.length) return NaN;
+    const y = numAttr(uses[0],"y");
+    return uses.every(u => Math.abs(numAttr(u,"y") - y) <= ROW_EPS) ? y : NaN;
+  }
+
+  function textYs(svg) {
+    return textNodes(svg).map(n => numAttr(n,"y")).filter(Number.isFinite);
+  }
+
+  function isVisualTextY(y, ys) {
+    return ys.some(v => Math.abs(v-y) <= ROW_EPS);
+  }
+
+  function localX(svg, x) { return x - viewBoxX(svg); }
+
+  function priceRegion(svg, source) {
+    if (!source) return null;
+    const vx=viewBoxX(svg);
+    const localX=source.hasAttribute("data-merged-price-x")
+      ? numAttr(source,"data-merged-price-x")
+      : numAttr(source,"x");
+    const localLen=source.hasAttribute("data-merged-price-length")
+      ? numAttr(source,"data-merged-price-length")
+      : numAttr(source,"textLength",20);
+    if (!Number.isFinite(localX)) return null;
+    const right=vx+localX-2.0;
+    const left=right-Math.max(8,Number.isFinite(localLen)?localLen:20)-7.0;
+    return {left,right};
+  }
+
+  function isPriceGroup(svg,group,source){
+    const region=priceRegion(svg,source);
+    if(!region) return false;
+    const uses=groupUses(group);
+    if(!uses.length) return false;
+    const xs=uses.map(u=>numAttr(u,"x"));
+    return Math.min(...xs)>=region.left-1 && Math.max(...xs)<=region.right+1;
+  }
+
+  function rowGroups(svg,y,mode="all",source=null){
+    const out=[];
+    for(const g of directVisualGroups(svg)){
+      const uses=groupUses(g);
+      if(!uses.length) continue;
+      const ys=uses.map(u=>numAttr(u,"y"));
+      if(!ys.every(v=>Math.abs(v-y)<=ROW_EPS)) continue;
+      const price=isPriceGroup(svg,g,source);
+      if(mode==="price" && !price) continue;
+      if(mode==="name" && price) continue;
+      out.push(g);
     }
+    return out;
+  }
 
-    const currentName = String(item.name ?? "");
-    const currentPrice = normalizePrice(item.price);
-    const faPrice = currentPrice === null ? null : toFaDigits(currentPrice);
-
-    const baseTextAttrs = {
-      "text-anchor": "end",
-      direction: "rtl",
-      "unicode-bidi": "plaintext",
-      "font-size": 10,
-      "font-family": "sans-serif",
-      fill: "#000"
-    };
-
-    if (merged) {
-      const display = faPrice === null ? currentName : `${currentName} ${faPrice}`;
-      const width = scaledTextLength(nameLength, originalDisplay, display);
-      group.appendChild(makeText({
-        ...baseTextAttrs,
-        x: viewX + nameX,
-        y,
-        textLength: width,
-        lengthAdjust: "spacingAndGlyphs"
-      }, display));
-    } else {
-      const nameWidth = scaledTextLength(nameLength, nameNode.textContent.trim(), currentName);
-      group.appendChild(makeText({
-        ...baseTextAttrs,
-        x: viewX + nameX,
-        y,
-        textLength: nameWidth,
-        lengthAdjust: "spacingAndGlyphs"
-      }, currentName));
-
-      if (faPrice !== null) {
-        let priceX;
-        let priceY;
-        let priceLength;
-        let originalPrice;
-
-        if (priceNode) {
-          priceX = parseFloat(priceNode.getAttribute("x"));
-          priceY = parseFloat(priceNode.getAttribute("y"));
-          priceLength = parseFloat(priceNode.getAttribute("textLength") || "20");
-          originalPrice = priceNode.getAttribute("data-original-price") || priceNode.textContent.trim();
-        } else {
-          priceX = parseFloat(nameNode.dataset.mergedPriceX || "91");
-          priceY = y;
-          priceLength = parseFloat(nameNode.dataset.mergedPriceLength || "21");
-          originalPrice = faPrice;
+  function priceVisualInfo(svg, priceNode, nameNode = null) {
+    const source = priceNode || nameNode;
+    if (!source) return null;
+    const y=numAttr(source,"y");
+    const groups=rowGroups(svg,y,"price",source);
+    const uses=[];
+    for (const g of groups) for (const u of groupUses(g)) uses.push({u,x:numAttr(u,"x"),fill:g.getAttribute("fill")||"#000"});
+    uses.sort((a,b)=>a.x-b.x);
+    let original="";
+    if (priceNode) {
+      original=normDigits(priceNode.getAttribute("data-original-price")||priceNode.textContent.trim());
+    } else if (nameNode && nameNode.getAttribute("data-menu-merged")==="1") {
+      const raw=nameNode.getAttribute("data-original-display")||"";
+      const m=raw.match(/([۰-۹0-9]+)\s*$/);
+      original=m?normDigits(m[1]):"";
+    }
+    if(!uses.length || !original || uses.length!==original.length) return null;
+    return {y,groups,uses,x0:uses[0].x,fill:uses[0].fill,refs:uses.map(o=>getHref(o.u)),original};
+  }
+  function buildFontMetrics(svg) {
+    const maps=Object.create(null);
+    for(const nameNode of itemNodes(svg)){
+      const id=nameNode.getAttribute("data-menu-id");
+      const node=priceNodeFor(svg,id);
+      const info=priceVisualInfo(svg,node,nameNode);
+      if(!info) continue;
+      const prefix=((info.refs[0].match(/^#?([^_]+)_/)||[])[1]||"");
+      if(!prefix) continue;
+      const m=maps[prefix] ||= {glyph:Object.create(null),advances:Object.create(null)};
+      const chars=info.original;
+      for(let i=0;i<chars.length;i++){
+        const d=chars[i],ref=info.refs[i];
+        if(!m.glyph[d]) m.glyph[d]=ref;
+        if(i<chars.length-1){
+          const delta=info.uses[i+1].x-info.uses[i].x;
+          if(delta>1 && delta<30) (m.advances[d] ||= []).push(delta);
         }
-
-        const width = scaledTextLength(priceLength, originalPrice, faPrice);
-        group.appendChild(makeText({
-          ...baseTextAttrs,
-          x: viewX + priceX,
-          y: priceY,
-          textLength: width,
-          lengthAdjust: "spacingAndGlyphs"
-        }, faPrice));
       }
     }
+    for(const m of Object.values(maps)){
+      for(const [d,arr] of Object.entries(m.advances)){
+        arr.sort((a,b)=>a-b);
+        m.advances[d]=arr[Math.floor(arr.length/2)];
+      }
+    }
+    return maps;
+  }
+  function drawVectorPrice(svg, info, metrics, newPrice, shiftY) {
+    const chars=normDigits(newPrice);
+    if (!chars || !info) return;
+    const prefix=((info.refs[0].match(/^#?([^_]+)_/)||[])[1]||"");
+    const font=metrics[prefix];
+    if (!font) return;
+    const group=document.createElementNS(SVG_NS,"g");
+    group.setAttribute("class","turna-vector-price");
+    group.setAttribute("data-turna-generated-price","1");
+    group.setAttribute("aria-hidden","true");
+    if (Math.abs(shiftY)>0.001) group.setAttribute("transform",`translate(0 ${shiftY})`);
 
+    const adv=Object.values(font.advances).filter(Number.isFinite);
+    const fallback=adv.length ? adv.reduce((a,b)=>a+b,0)/adv.length : 7;
+    let x=info.x0;
+    for (let i=0;i<chars.length;i++) {
+      const ref=font.glyph[chars[i]];
+      if (!ref) return;
+      const use=document.createElementNS(SVG_NS,"use");
+      use.setAttribute("href",ref);
+      use.setAttribute("x",String(x));
+      use.setAttribute("y",String(info.y));
+      use.setAttribute("fill",info.fill);
+      group.appendChild(use);
+      x += Number.isFinite(font.advances[chars[i]]) ? font.advances[chars[i]] : fallback;
+    }
     svg.appendChild(group);
   }
 
-  function initTurnaEditor() {
-    document.querySelectorAll("svg").forEach(svg => {
-      svg.querySelectorAll("[data-menu-id][data-menu-role='name']").forEach(nameNode => {
-        const id = nameNode.getAttribute("data-menu-id");
-        const item = MENU_CONFIG[id];
-        if (!item) return;
+  function originalPriceValue(priceNode, nameNode) {
+    if(priceNode) return normalizePrice(priceNode.getAttribute("data-original-price")||priceNode.textContent.trim());
+    if(nameNode && nameNode.getAttribute("data-menu-merged")==="1"){
+      const raw=nameNode.getAttribute("data-original-display")||"";
+      const m=raw.match(/([۰-۹0-9]+)\s*$/);
+      return m?normalizePrice(m[1]):null;
+    }
+    return null;
+  }
+  function sectionStep(svg) {
+    const ys=itemNodes(svg).map(n=>numAttr(n,"y")).filter(Number.isFinite).sort((a,b)=>a-b);
+    const diffs=[];
+    for(let i=1;i<ys.length;i++){
+      const d=ys[i]-ys[i-1];
+      if(d>10 && d<30) diffs.push(d);
+    }
+    if(!diffs.length) return 17.84;
+    diffs.sort((a,b)=>a-b);
+    return diffs[Math.floor(diffs.length/2)];
+  }
 
-        const priceNode = svg.querySelector(
-          `[data-menu-id="${CSS.escape(id)}"][data-menu-role="price"]`
-        );
+  function deletionPlan(svg) {
+    const items=itemNodes(svg).map(node=>({
+      node,
+      id:node.getAttribute("data-menu-id"),
+      y:numAttr(node,"y"),
+      disabled:MENU_CONFIG[node.getAttribute("data-menu-id")]?.enabled===false
+    })).filter(x=>Number.isFinite(x.y));
+    const disabled=items.filter(x=>x.disabled).sort((a,b)=>a.y-b.y);
+    const hiddenYs=new Set(disabled.map(d=>d.y.toFixed(2)));
+    const allTexts=textNodes(svg);
 
-        const originalName = nameNode.dataset.menuMerged === "1"
-          ? String(nameNode.dataset.originalDisplay || "").replace(/\s*[۰-۹0-9]{3,}\s*$/, "").trim()
-          : nameNode.textContent.trim();
+    // Hide untagged subtitles belonging to disabled items. A subtitle is
+    // text after the item and before the next item/category heading.
+    const headings=allTexts
+      .filter(t=>!t.hasAttribute("data-menu-id") && numAttr(t,"textLength",0)>=140)
+      .map(t=>numAttr(t,"y"))
+      .filter(Number.isFinite)
+      .sort((a,b)=>a-b);
 
-        const originalPrice = priceNode
-          ? normalizePrice(priceNode.getAttribute("data-original-price") || priceNode.textContent.trim())
-          : (nameNode.dataset.menuMerged === "1"
-              ? normalizePrice((nameNode.dataset.originalDisplay || "").match(/[۰-۹0-9]{3,}$/)?.[0])
-              : null);
+    for(const d of disabled){
+      const nextItem=items.filter(x=>x.y>d.y+ROW_EPS).map(x=>x.y).sort((a,b)=>a-b)[0];
+      const nextHeading=headings.filter(y=>y>d.y+ROW_EPS)[0];
+      const boundaries=[nextItem,nextHeading].filter(Number.isFinite);
+      if(!boundaries.length) continue;
+      const boundary=Math.min(...boundaries);
+      for(const t of allTexts){
+        if(t.hasAttribute("data-menu-id")) continue;
+        const y=numAttr(t,"y");
+        if(Number.isFinite(y) && y>d.y+ROW_EPS && y<boundary-ROW_EPS) hiddenYs.add(y.toFixed(2));
+      }
+    }
+    return {items,disabled,hiddenYs};
+  }
 
-        const currentName = String(item.name ?? "");
-        const currentPrice = normalizePrice(item.price);
+  function applyCompaction(svg) {
+    const plan=deletionPlan(svg);
+    const step=sectionStep(svg);
+    const deletedYs=plan.disabled.map(d=>d.y);
+    const visualYs=textYs(svg);
+    const shiftForY=(y)=>-step*deletedYs.filter(d=>y>d+ROW_EPS).length;
 
-        const changed =
-          item.enabled === false ||
-          currentName !== originalName ||
-          currentPrice !== originalPrice;
+    if(plan.disabled.length){
+      for(const g of directVisualGroups(svg)){
+        const y=groupY(g);
+        if(!Number.isFinite(y) || !isVisualTextY(y,visualYs)) continue;
+        if(plan.hiddenYs.has(y.toFixed(2))){
+          g.setAttribute("display","none");
+          g.setAttribute("data-turna-hidden","1");
+        } else {
+          const shift=shiftForY(y);
+          if(Math.abs(shift)>0.001){
+            const base=g.getAttribute("transform")||"";
+            if(!g.hasAttribute("data-turna-base-transform")) g.setAttribute("data-turna-base-transform",base);
+            g.setAttribute("transform",[base,`translate(0 ${shift})`].filter(Boolean).join(" "));
+          }
+        }
+      }
+    }
+    return shiftForY;
+  }
 
-        if (changed) drawChangedItem(svg, item, nameNode, priceNode);
-      });
+  function hideOriginalPriceGroups(svg,priceNode,nameNode){
+    const info=priceVisualInfo(svg,priceNode,nameNode);
+    if(info) info.groups.forEach(g=>g.setAttribute("display","none"));
+    return info;
+  }
+  function drawChangedName(svg,item,nameNode,shiftY){
+    const current=String(item.name ?? "");
+    const original=originalName(nameNode);
+    if(current===original) return;
+    const groups=rowGroups(svg,numAttr(nameNode,"y"),"name",nameNode);
+    if(!groups.length) return;
+    groups.forEach(g=>g.setAttribute("display","none"));
+    const t=document.createElementNS(SVG_NS,"text");
+    t.setAttribute("class","turna-changed-name");
+    t.setAttribute("x",nameNode.getAttribute("x"));
+    t.setAttribute("y",String(numAttr(nameNode,"y")+shiftY));
+    t.setAttribute("fill",groups[0].getAttribute("fill")||"#000");
+    t.setAttribute("font-size",nameNode.getAttribute("font-size")||"10");
+    t.setAttribute("font-family",nameNode.getAttribute("font-family")||"sans-serif");
+    t.setAttribute("text-anchor","end");
+    t.setAttribute("direction","rtl");
+    t.setAttribute("unicode-bidi","plaintext");
+    t.textContent=current;
+    svg.appendChild(t);
+  }
+
+  function buildDocumentMetrics(){
+    const merged=Object.create(null);
+    document.querySelectorAll("section.col > svg").forEach(svg=>{
+      const local=buildFontMetrics(svg);
+      for(const [prefix,font] of Object.entries(local)){
+        const dst=merged[prefix] ||= {glyph:Object.create(null),advances:Object.create(null)};
+        for(const [d,ref] of Object.entries(font.glyph)) if(!dst.glyph[d]) dst.glyph[d]=ref;
+        for(const [d,val] of Object.entries(font.advances)){
+          if(!Number.isFinite(val)) continue;
+          // Prefer the first stable metric; all source sections use the same glyph font.
+          if(!Number.isFinite(dst.advances[d])) dst.advances[d]=val;
+        }
+      }
+    });
+    return merged;
+  }
+
+  function initTurnaEditor(){
+    const documentMetrics=buildDocumentMetrics();
+    document.querySelectorAll("section.col > svg").forEach(svg=>{
+      const metrics=documentMetrics;
+      const shiftForY=applyCompaction(svg);
+
+      for(const nameNode of itemNodes(svg)){
+        const id=nameNode.getAttribute("data-menu-id");
+        const item=MENU_CONFIG[id];
+        if(!item || item.enabled===false) continue;
+        const y=numAttr(nameNode,"y");
+        const shift=shiftForY(y);
+        const priceNode=priceNodeFor(svg,id);
+        const currentPrice=normalizePrice(item.price);
+        const originalPrice=originalPriceValue(priceNode,nameNode);
+
+        if(currentPrice!==originalPrice){
+          const info=hideOriginalPriceGroups(svg,priceNode,nameNode);
+          if(info) drawVectorPrice(svg,info,metrics,currentPrice,shift);
+        }
+        drawChangedName(svg,item,nameNode,shift);
+      }
     });
   }
 
-  window.addEventListener("DOMContentLoaded", initTurnaEditor);
-})();
-</script>
+  window.addEventListener("DOMContentLoaded",initTurnaEditor);
+})();</script>
 
 </body>
 </html>
